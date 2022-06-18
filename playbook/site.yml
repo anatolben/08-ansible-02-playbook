@@ -1,0 +1,121 @@
+---
+- name: Install Clickhouse
+  hosts: clickhouse
+  handlers:
+    - name: Start clickhouse service
+      become: true
+      ansible.builtin.service:
+        name: clickhouse-server
+        enabled: yes
+        state: restarted
+  tasks:
+    - block:
+        - name: Get clickhouse distrib
+          ansible.builtin.get_url:
+            url: "https://packages.clickhouse.com/rpm/stable/{{ item }}-{{ clickhouse_version }}.noarch.rpm"
+            dest: "./{{ item }}-{{ clickhouse_version }}.rpm"
+          with_items: "{{ clickhouse_packages }}"
+      rescue:
+        - name: Get clickhouse distrib
+          ansible.builtin.get_url:
+            url: "https://packages.clickhouse.com/rpm/stable/clickhouse-common-static-{{ clickhouse_version }}.x86_64.rpm"
+            dest: "./clickhouse-common-static-{{ clickhouse_version }}.rpm"
+    - name: Install clickhouse packages
+      become: true
+      ansible.builtin.yum:
+        name:
+          - clickhouse-common-static-{{ clickhouse_version }}.rpm
+          - clickhouse-client-{{ clickhouse_version }}.rpm
+          - clickhouse-server-{{ clickhouse_version }}.rpm
+      notify:
+        - Start clickhouse service
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+    - name: Create database
+      ansible.builtin.command: "clickhouse-client -q 'create database logs;'"
+      register: create_db
+      failed_when: create_db.rc != 0 and create_db.rc !=82
+      changed_when: create_db.rc == 0
+- name: Install Vector
+  hosts: clickhouse
+  handlers:
+    - name: Start vector service
+      become: true
+      ansible.builtin.service:
+        name: vector
+        enabled: yes
+        state: restarted
+  tasks:
+    - name: Get Vector distrib
+      ansible.builtin.get_url:
+        url: "https://packages.timber.io/vector/{{ vector_version }}/vector-{{ vector_version }}-{{ vector_arch }}.tar.gz"
+        dest: "/tmp/vector-{{ vector_version }}-{{ vector_arch }}.tar.gz"
+      tags: vector
+    - name: Check extractor presents
+      become: true
+      ansible.builtin.yum:
+        name:
+          - gzip
+          - tar
+        state: present
+    - name: Extract archive
+      ansible.builtin.unarchive:
+        src: "/tmp/vector-{{ vector_version }}-{{ vector_arch }}.tar.gz"
+        dest: "/tmp/"
+        remote_src: true
+      tags: vector
+    - name: Copy Vector to /usr/lib
+      become: true
+      ansible.builtin.copy:
+        src: /tmp/vector-{{ vector_arch }}/
+        dest: /usr/lib/vector/
+        remote_src: true
+      tags: vector
+    - name: Creating a symlink to /usr/bin
+      become: true
+      ansible.builtin.file:
+        src: "/usr/lib/vector/bin/vector"
+        dest: "/usr/bin/vector"
+        state: link
+      tags: vector
+    - name: Copy config file
+      become: true
+      ansible.builtin.copy:
+        src: /tmp/vector-{{ vector_arch }}/config/vector.toml
+        dest: /etc/vector/
+        remote_src: true
+      tags: [vector, config]
+    - name: Create user
+      become: true
+      ansible.builtin.user:
+        name: "vector"
+        groups:
+          - root
+          - systemd-journal
+        state: present
+      tags: vector
+    - name: Create a data directory Vector
+      become: true
+      ansible.builtin.file:
+        path: /var/lib/vector
+        state: directory
+        mode: '0755'
+        owner: vector
+        group: root
+      tags: vector
+    - name: Replace line in file examples
+      become: true
+      ansible.builtin.replace: 
+        path: /usr/lib/vector/etc/systemd/vector.service
+        regexp: '^(.*)(bin/vector)(.*)$'
+        replace: '\1bin/vector --config-dir /etc/vector\3'
+        backup: yes
+    - name: Copy service unit file
+      become: true
+      ansible.builtin.copy:
+        src: /usr/lib/vector/etc/systemd/vector.service
+        dest: /usr/lib/systemd/system
+        remote_src: true
+      notify:
+        - Start vector service
+
